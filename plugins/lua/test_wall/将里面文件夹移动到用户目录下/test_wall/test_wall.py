@@ -44,12 +44,16 @@ NTP_SERVERS = [
 
 # 外网连通性测试站点
 CONNECTIVITY_SITES = [
-    ("https://www.google.com", "Google"),
-    ("https://www.youtube.com", "YouTube"),
-    ("https://www.facebook.com", "Facebook"),
-    ("https://twitter.com", "Twitter"),
-    ("https://www.instagram.com", "Instagram"),
+    ("https://www.google.com/generate_204", "Google"),
+    ("https://www.youtube.com/generate_204", "YouTube"),
+    ("https://www.facebook.com/generate_204", "Facebook"),
+    ("https://twitter.com/generate_204", "Twitter"),
+
 ]
+#不行的
+#("https://cp.cloudflare.com/generate_204", "Cloudflare"),
+#("http://detectportal.firefox.com/success.txt", "Firefox"),
+#("https://instagram.com/favicon.ico", "Instagram"),
 
 # 国外 IP 查询站点
 FOREIGN_IP_SITES = [

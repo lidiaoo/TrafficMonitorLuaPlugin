@@ -26,7 +26,7 @@ TIMEOUT = 4                  # 脚本整体超时时间（秒）
 REQUEST_TIMEOUT = 2          # 单个请求超时时间（秒）
 OUTPUT_FILENAME = "test_wall_output.txt"  # 输出文件名
 DEFAULT_ENCODING = "utf-8"   # 默认编码
-REQUEST_MODE = "hybrid"      # 请求模式: urllib/curl/hybrid（混合模式）
+REQUEST_MODE = "curl"      # 请求模式: urllib/curl/hybrid（混合模式）
 # ================================================
 
 # 根据平台确定输出目录

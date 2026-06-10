@@ -10,6 +10,7 @@ import re
 import argparse
 import json
 import tempfile
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Windows 兼容性：SIGALRM 只在 Unix 系统存在
@@ -25,6 +26,7 @@ TIMEOUT = 4                  # 脚本整体超时时间（秒）
 REQUEST_TIMEOUT = 2          # 单个请求超时时间（秒）
 OUTPUT_FILENAME = "test_wall_output.txt"  # 输出文件名
 DEFAULT_ENCODING = "utf-8"   # 默认编码
+USE_CURL = True              # 默认使用 curl
 # ================================================
 
 # 根据平台确定输出目录
@@ -35,6 +37,9 @@ else:
 
 OUTPUT_FILE = os.path.join(CACHE_DIR, OUTPUT_FILENAME)
 
+# 全局变量：是否使用 curl
+g_use_curl = USE_CURL
+
 # NTP 服务器列表
 NTP_SERVERS = [
     ("time.google.com", "Google"),
@@ -42,12 +47,13 @@ NTP_SERVERS = [
     ("time.facebook.com", "Facebook"),
 ]
 
+#尽量使用http 因为https比http慢50ms以上
 # 外网连通性测试站点
 CONNECTIVITY_SITES = [
-    ("https://www.google.com/generate_204", "Google"),
-    ("https://www.youtube.com/generate_204", "YouTube"),
-    ("https://www.facebook.com/generate_204", "Facebook"),
-    ("https://twitter.com/generate_204", "Twitter"),
+    ("http://www.google.com/generate_204", "Google"),
+    ("http://www.youtube.com/generate_204", "YouTube"),
+    ("http://www.facebook.com/generate_204", "Facebook"),
+    ("http://twitter.com/generate_204", "Twitter"),
 
 ]
 #不行的
@@ -88,11 +94,68 @@ CACHE_EXPIRE_SECONDS = 3600
 # 全局编码变量
 CURRENT_ENCODING = DEFAULT_ENCODING
 
+# ==================== 工具函数 ====================
+
+def get_curl_command():
+    """获取跨平台的 curl 命令路径"""
+    if sys.platform == 'win32':
+        # Windows 上优先使用 curl.exe（避免 PowerShell 的 Invoke-WebRequest 别名）
+        # 检查常见的 curl 安装路径
+        curl_paths = [
+            'curl.exe',
+            r'C:\Windows\System32\curl.exe',
+            r'C:\Program Files\curl\bin\curl.exe',
+            r'C:\Program Files (x86)\curl\bin\curl.exe',
+        ]
+        for path in curl_paths:
+            try:
+                result = subprocess.run([path, '--version'], capture_output=True, timeout=2)
+                if result.returncode == 0:
+                    return path
+            except:
+                pass
+        # 如果找不到 curl.exe，返回 None（会自动回退到 Python）
+        return None
+    else:
+        # Linux/macOS 上直接使用 curl
+        return 'curl'
+
+def curl_request(url, timeout=REQUEST_TIMEOUT):
+    """Use curl to make HTTP request, return latency (ms) or None"""
+    curl_cmd = get_curl_command()
+    if not curl_cmd:
+        return None
+
+    try:
+        start_time = time.time()
+        # Use appropriate null device for platform
+        null_device = 'NUL' if sys.platform == 'win32' else '/dev/null'
+
+        cmd = [
+            curl_cmd,
+            '-o', null_device,
+            '-s',
+            '-w', '%{time_total}',
+            '-m', str(timeout),
+            '-A', 'Mozilla/5.0',
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 1)
+        elapsed_ms = (time.time() - start_time) * 1000
+
+        if result.returncode == 0 and result.stdout:
+            curl_time = float(result.stdout.strip()) * 1000
+            return (curl_time, elapsed_ms)
+        else:
+            return None
+    except Exception as e:
+        return None
+
 # ==================== 核心函数 ====================
 
 def query_ip_from_sites(site_list, timeout=REQUEST_TIMEOUT):
     """从指定的站点列表中并发查询 IP，返回最先成功的结果"""
-    def query_site(url, site_name):
+    def query_site_python(url, site_name):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -104,8 +167,26 @@ def query_ip_from_sites(site_list, timeout=REQUEST_TIMEOUT):
             pass
         return None
 
+    def query_site_curl(url, site_name):
+        try:
+            # 使用 curl 测试连通性，然后用 Python 获取内容
+            result = curl_request(url, timeout)
+            if result:
+                # curl 成功，再用 Python 获取 IP
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    content = response.read().decode('utf-8').strip()
+                    ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', content)
+                    if ip_match:
+                        return (ip_match.group(1), site_name)
+        except:
+            pass
+        return None
+
+    query_func = query_site_curl if g_use_curl else query_site_python
+
     with ThreadPoolExecutor(max_workers=len(site_list)) as executor:
-        futures = [executor.submit(query_site, url, name) for url, name in site_list]
+        futures = [executor.submit(query_func, url, name) for url, name in site_list]
         for future in as_completed(futures):
             result = future.result()
             if result:
@@ -171,7 +252,7 @@ def get_ip_country(ip_address, timeout=REQUEST_TIMEOUT):
 
 def test_connectivity(timeout=REQUEST_TIMEOUT, max_workers=5):
     """并发测试外网连通性，返回最快响应的延迟"""
-    def test_site(url, site_label):
+    def test_site_python(url, site_label):
         try:
             start_time = time.time()
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -183,9 +264,21 @@ def test_connectivity(timeout=REQUEST_TIMEOUT, max_workers=5):
             pass
         return None
 
+    def test_site_curl(url, site_label):
+        try:
+            result = curl_request(url, timeout)
+            if result:
+                curl_time, real_time = result
+                return (curl_time, site_label, url)
+        except:
+            pass
+        return None
+
+    test_func = test_site_curl if g_use_curl else test_site_python
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_site = {
-            executor.submit(test_site, url, label): (url, label)
+            executor.submit(test_func, url, label): (url, label)
             for url, label in CONNECTIVITY_SITES
         }
         for future in as_completed(future_to_site):
@@ -248,6 +341,12 @@ def parse_args():
                         help='循环模式下的间隔秒数 (默认: 30秒)')
     parser.add_argument('--encoding', '-e', type=str, default=DEFAULT_ENCODING,
                         help=f'输出编码（控制台和文件）(默认: {DEFAULT_ENCODING})')
+    parser.add_argument('--use-curl', action='store_true', default=USE_CURL,
+                        help='使用 curl 发起 HTTP 请求（默认启用）')
+    parser.add_argument('--use-urllib', action='store_true', default=False,
+                        help='使用 Python urllib 发起 HTTP 请求')
+    parser.add_argument('--check-curl', action='store_true', default=False,
+                        help='检查系统中是否安装了 curl')
     args = parser.parse_args()
 
     return {
@@ -257,7 +356,10 @@ def parse_args():
         'show_connectivity': args.connectivity == 'show',
         'loop': args.loop,
         'interval': args.interval,
-        'encoding': args.encoding
+        'encoding': args.encoding,
+        'use_curl': args.use_curl,
+        'use_urllib': args.use_urllib,
+        'check_curl': args.check_curl,
     }
 
 def run_once(show_foreign, show_domestic, show_ntp, show_connectivity):
@@ -296,7 +398,7 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity):
                     del futures[name]
             time.sleep(0.05)
 
-    # 构建输出内容
+    # Build output content
     if foreign_result:
         ip_address, site_name = foreign_result
         try:
@@ -332,7 +434,7 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity):
             parts.append("❌ 连通性")
 
     if parts:
-        # 使用全角竖线分隔
+        # Use pipe separator
         return "｜".join(parts)
     else:
         return "⚠️ 无数据"
@@ -366,16 +468,15 @@ def write_output(text, encoding):
             print(error_msg, file=sys.stderr)
 
 def run_with_loop(show_foreign, show_domestic, show_ntp, show_connectivity, interval, encoding):
-    """循环模式：持续运行，按指定间隔更新"""
-    # 设置全局编码
+    """Loop mode: run continuously with specified interval"""
     global CURRENT_ENCODING
     CURRENT_ENCODING = encoding
-    
-    # 这些信息使用指定的编码输出
+
     info_lines = [
-        f"启动循环模式，间隔 {interval} 秒",
-        f"输出文件: {OUTPUT_FILE} (编码: {encoding})",
-        "按 Ctrl+C 停止运行\n"
+        f"Starting loop mode with interval {interval} seconds",
+        f"Request method: {'curl' if g_use_curl else 'Python urllib'}",
+        f"Output file: {OUTPUT_FILE} (encoding: {encoding})",
+        "Press Ctrl+C to stop\n"
     ]
     for line in info_lines:
         write_output(line, encoding)
@@ -385,12 +486,12 @@ def run_with_loop(show_foreign, show_domestic, show_ntp, show_connectivity, inte
             output_text = run_once(show_foreign, show_domestic, show_ntp, show_connectivity)
             write_output(output_text, encoding)
         except Exception as e:
-            error_msg = f"运行出错: {e}"
+            error_msg = f"Error: {e}"
             try:
                 sys.stderr.buffer.write(error_msg.encode(encoding, errors='replace') + b'\n')
             except:
                 print(error_msg, file=sys.stderr)
-            write_output(f"⚠️ {error_msg}", encoding)
+            write_output(f"ERROR {error_msg}", encoding)
 
         time.sleep(interval)
 
@@ -399,7 +500,7 @@ def run_single(show_foreign, show_domestic, show_ntp, show_connectivity, encodin
     # 设置全局编码
     global CURRENT_ENCODING
     CURRENT_ENCODING = encoding
-    
+
     # Windows 超时处理
     if sys.platform == 'win32':
         timer = threading.Timer(TIMEOUT + 1, lambda: (write_output("❌ 超时", encoding), os._exit(1)))
@@ -415,8 +516,44 @@ def run_single(show_foreign, show_domestic, show_ntp, show_connectivity, encodin
         if sys.platform != 'win32':
             signal.alarm(0)
 
+def check_curl_availability():
+    """检查系统中是否安装了 curl"""
+    curl_cmd = get_curl_command()
+    if curl_cmd:
+        try:
+            sys.stdout.buffer.write(f"OK curl available: {curl_cmd}\n".encode('utf-8'))
+            result = subprocess.run([curl_cmd, '--version'], capture_output=True, text=True, timeout=2)
+            if result.stdout:
+                lines = result.stdout.split('\n')
+                if lines:
+                    sys.stdout.buffer.write(f"   Version: {lines[0]}\n".encode('utf-8'))
+        except:
+            print(f"OK curl available: {curl_cmd}")
+    else:
+        try:
+            sys.stdout.buffer.write("NO curl not available, using Python urllib\n".encode('utf-8'))
+        except:
+            print("NO curl not available, using Python urllib")
+    try:
+        sys.stdout.buffer.write(b"\n")
+    except:
+        print()
+
 def main():
+    global g_use_curl
+
     args = parse_args()
+
+    # 检查 curl 可用性
+    if args['check_curl']:
+        check_curl_availability()
+        return
+
+    # 设置请求方式：--use-urllib 优先级最高
+    if args['use_urllib']:
+        g_use_curl = False
+    else:
+        g_use_curl = args['use_curl']
 
     if args['loop']:
         # 循环模式

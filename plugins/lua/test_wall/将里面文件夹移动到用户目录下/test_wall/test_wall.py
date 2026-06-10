@@ -43,6 +43,7 @@ NTP_SERVERS = [
     ("time.cloudflare.com", "Cloudflare"),
     ("time.facebook.com", "Facebook"),
 ]
+MAX_NTP_NAME_LEN = max(len(name) for _, name in NTP_SERVERS)
 
 #尽量使用http 因为https比http慢50ms以上
 # 外网连通性测试站点
@@ -57,6 +58,7 @@ CONNECTIVITY_SITES = [
 #("https://cp.cloudflare.com/generate_204", "Cloudflare"),
 #("http://detectportal.firefox.com/success.txt", "Firefox"),
 #("https://instagram.com/favicon.ico", "Instagram"),
+MAX_CONN_NAME_LEN = max(len(name) for _, name in CONNECTIVITY_SITES)
 
 # 国外 IP 查询站点
 FOREIGN_IP_SITES = [
@@ -65,6 +67,7 @@ FOREIGN_IP_SITES = [
     ("https://icanhazip.com", "ICanHazIP"),
     ("https://ifconfig.me/ip", "IfConfig"),
 ]
+MAX_FOREIGN_NAME_LEN = max(len(name) for _, name in FOREIGN_IP_SITES)
 
 # 国内 IP 查询站点
 DOMESTIC_IP_SITES = [
@@ -72,6 +75,7 @@ DOMESTIC_IP_SITES = [
     ("https://myip.ipip.net", "IPIP"),
     ("https://ip.sb", "IP.SB"),
 ]
+MAX_DOMESTIC_NAME_LEN = max(len(name) for _, name in DOMESTIC_IP_SITES)
 
 # 国旗映射表
 COUNTRY_FLAGS = {
@@ -520,11 +524,14 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
         if show_ip_latency:
             delay_int = int(round(latency_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            method_str = f"{method}\t" if show_method else ""
+            method_str = f"{method:7}" if show_method else "" # curl→"curl  "，urllib→"urllib"
+            site_str = site_name.ljust(MAX_FOREIGN_NAME_LEN)
+            delay_str = f"{icon} {delay_int}ms"
+            delay_str = delay_str.rjust(8)
             if show_ip_source:
-                parts.append(f"{flag} {ip_address}\t{method_str}{site_name}\t{icon} {delay_int}ms")
+                parts.append(f"{flag} {ip_address} {method_str}{site_name} {delay_str}")
             else:
-                parts.append(f"{flag} {ip_address}\t{method_str}{icon} {delay_int}ms")
+                parts.append(f"{flag} {ip_address} {method_str} {delay_str}")
         else:
             parts.append(f"{flag} {ip_address}")
     elif show_foreign:
@@ -535,11 +542,14 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
         if show_ip_latency:
             delay_int = int(round(latency_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            method_str = f"{method}\t" if show_method else ""
+            method_str = f"{method:7}" if show_method else "" # curl→"curl  "，urllib→"urllib"
+            site_str = site_name.ljust(MAX_DOMESTIC_NAME_LEN)
+            delay_str = f"{icon} {delay_int}ms"
+            delay_str = delay_str.rjust(8)
             if show_ip_source:
-                parts.append(f"🇨🇳 {ip_address}\t{method_str}{site_name}\t{icon} {delay_int}ms")
+                parts.append(f"🇨🇳 {ip_address} {method_str}{site_str} {delay_str}")
             else:
-                parts.append(f"🇨🇳 {ip_address}\t{method_str}{icon} {delay_int}ms")
+                parts.append(f"🇨🇳 {ip_address} {method_str} {delay_str}")
         else:
             parts.append(f"🇨🇳 {ip_address}")
     elif show_domestic:
@@ -550,10 +560,13 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
             delay_ms, server_label, server_name = ntp_result
             delay_int = int(round(delay_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
+            server_str = server_name.ljust(MAX_NTP_NAME_LEN)
+            delay_str = f"{icon} {delay_int}ms"
+            delay_str = delay_str.rjust(8)
             if show_latency_source:
-                parts.append(f"{server_label}\t{icon} {delay_int}ms")
+                parts.append(f"{server_str} {delay_str}")
             else:
-                parts.append(f"{icon} {delay_int}ms")
+                parts.append(f"{delay_str}")
         else:
             parts.append("❌ NTP")
 
@@ -562,11 +575,14 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
             delay_ms, site_label, url, method = connectivity_result
             delay_int = int(round(delay_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            method_str = f"{method}\t" if show_method else ""
+            method_str = f"{method:7}" if show_method else "" # curl→"curl  "，urllib→"urllib"
+            site_str = site_label.ljust(MAX_CONN_NAME_LEN)
+            delay_str = f"{icon} {delay_int}ms"
+            delay_str = delay_str.rjust(8)
             if show_latency_source:
-                parts.append(f"{method_str}{site_label}\t{icon} {delay_int}ms")
+                parts.append(f"{method_str}{site_str} {delay_str}")
             else:
-                parts.append(f"{method_str}{icon} {delay_int}ms")
+                parts.append(f"{method_str} {delay_str}")
         else:
             parts.append("❌ 连通性")
 

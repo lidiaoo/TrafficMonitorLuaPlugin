@@ -1,5 +1,5 @@
 name="test_wall"
-sample="🇯🇵 103.151.173.197｜FaceBook ⚠️ 397ms"
+sample="🇯🇵｜FaceBook ⚠️397ms"
 interval=3
 
 function onUpdate()
@@ -18,10 +18,10 @@ function onUpdate()
     end
 
     if out == "" or out == nil then
-        return "网络: 无响应"
+        return "无响应"
     end
 
-    return "网络: " .. out
+    return out
 end
 
 function onClick()

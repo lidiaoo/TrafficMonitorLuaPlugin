@@ -433,32 +433,29 @@ def parse_args():
                         help='显示NTP延迟 (默认: hide)')
     parser.add_argument('--connectivity', choices=['show', 'hide'],
                         default='show' if SHOW_CONNECTIVITY else 'hide',
-                        help='显示外网连通性延迟 (默认：show)')
+                        help='显示外网连通性延迟 (默认: show)')
     parser.add_argument('--loop', '-l', action='store_true', default=False,
-                        help='启用循环模式，持续运行 (默认：关闭)')
+                        help='启用循环模式，持续运行 (默认: 关闭)')
     parser.add_argument('--interval', '-i', type=int, default=30,
-                        help='循环模式下的间隔秒数 (默认：30 秒)')
+                        help='循环模式下的间隔秒数 (默认: 30)')
     parser.add_argument('--encoding', '-e', type=str, default=DEFAULT_ENCODING,
-                        help=f'输出编码（控制台和文件）(默认：{DEFAULT_ENCODING})')
+                        help=f'输出编码（控制台和文件）(默认: {DEFAULT_ENCODING})')
     parser.add_argument('--mode', choices=['urllib', 'curl', 'hybrid'],
                         default=REQUEST_MODE,
-                        help='请求模式：urllib/curl/hybrid（混合模式，默认：hybrid）')
+                        help='请求模式：urllib/curl/hybrid（混合模式）(默认: hybrid)')
     parser.add_argument('--show-method', action='store_true', default=False,
-                        help='显示请求方式（curl/urllib）')
+                        help='显示请求方式（curl/urllib）(默认: 不显示)')
     parser.add_argument('--check-curl', action='store_true', default=False,
                         help='检查系统中是否安装了 curl')
-    parser.add_argument('--show-ip-latency', action='store_true', default=False,
-                        help='显示IP来源的延迟（默认不显示）')
-    parser.add_argument('--hide-ip-latency', action='store_true', default=False,
-                        help='隐藏IP来源的延迟')
-    parser.add_argument('--show-ip-source', action='store_true', default=False,
-                        help='显示IP来源站点名称（默认不显示）')
-    parser.add_argument('--hide-ip-source', action='store_true', default=False,
-                        help='隐藏IP来源站点名称')
-    parser.add_argument('--show-latency-source', action='store_true', default=True,
-                        help='显示延迟测试来源站点名称（默认启用）')
-    parser.add_argument('--hide-latency-source', action='store_true', default=False,
-                        help='隐藏延迟测试来源站点名称')
+    parser.add_argument('--ip-latency', choices=['show', 'hide'],
+                        default='hide',
+                        help='显示/隐藏IP来源的延迟 (默认: hide)')
+    parser.add_argument('--ip-source', choices=['show', 'hide'],
+                        default='hide',
+                        help='显示/隐藏IP来源站点名称 (默认: hide)')
+    parser.add_argument('--latency-source', choices=['show', 'hide'],
+                        default='show',
+                        help='显示/隐藏延迟测试来源站点名称 (默认: show)')
     args = parser.parse_args()
 
     return {
@@ -472,9 +469,9 @@ def parse_args():
         'mode': args.mode,
         'show_method': args.show_method,
         'check_curl': args.check_curl,
-        'show_ip_source': args.show_ip_source and not args.hide_ip_source,
-        'show_latency_source': args.show_latency_source and not args.hide_latency_source,
-        'show_ip_latency': args.show_ip_latency and not args.hide_ip_latency,
+        'show_ip_source': args.ip_source == 'show',
+        'show_latency_source': args.latency_source == 'show',
+        'show_ip_latency': args.ip_latency == 'show',
     }
 
 def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_source=False, show_latency_source=True, show_ip_latency=False, mode="hybrid", show_method=False):
@@ -523,11 +520,11 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
         if show_ip_latency:
             delay_int = int(round(latency_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            method_str = f"{method} " if show_method else ""
+            method_str = f"{method}\t" if show_method else ""
             if show_ip_source:
-                parts.append(f"{flag} {ip_address}｜{method_str}{site_name} {icon} {delay_int}ms")
+                parts.append(f"{flag} {ip_address}\t{method_str}{site_name}\t{icon} {delay_int}ms")
             else:
-                parts.append(f"{flag} {ip_address}｜{method_str}{icon} {delay_int}ms")
+                parts.append(f"{flag} {ip_address}\t{method_str}{icon} {delay_int}ms")
         else:
             parts.append(f"{flag} {ip_address}")
     elif show_foreign:
@@ -538,11 +535,11 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
         if show_ip_latency:
             delay_int = int(round(latency_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            method_str = f"{method} " if show_method else ""
+            method_str = f"{method}\t" if show_method else ""
             if show_ip_source:
-                parts.append(f"🇨🇳 {ip_address}｜{method_str}{site_name} {icon} {delay_int}ms")
+                parts.append(f"🇨🇳 {ip_address}\t{method_str}{site_name}\t{icon} {delay_int}ms")
             else:
-                parts.append(f"🇨🇳 {ip_address}｜{method_str}{icon} {delay_int}ms")
+                parts.append(f"🇨🇳 {ip_address}\t{method_str}{icon} {delay_int}ms")
         else:
             parts.append(f"🇨🇳 {ip_address}")
     elif show_domestic:
@@ -554,7 +551,7 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
             delay_int = int(round(delay_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
             if show_latency_source:
-                parts.append(f"{server_label} {icon} {delay_int}ms")
+                parts.append(f"{server_label}\t{icon} {delay_int}ms")
             else:
                 parts.append(f"{icon} {delay_int}ms")
         else:
@@ -565,9 +562,9 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_ip_s
             delay_ms, site_label, url, method = connectivity_result
             delay_int = int(round(delay_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            method_str = f"{method} " if show_method else ""
+            method_str = f"{method}\t" if show_method else ""
             if show_latency_source:
-                parts.append(f"{method_str}{site_label} {icon} {delay_int}ms")
+                parts.append(f"{method_str}{site_label}\t{icon} {delay_int}ms")
             else:
                 parts.append(f"{method_str}{icon} {delay_int}ms")
         else:

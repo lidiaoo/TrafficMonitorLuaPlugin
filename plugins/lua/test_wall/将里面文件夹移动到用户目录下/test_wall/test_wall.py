@@ -26,7 +26,7 @@ TIMEOUT = 4                  # 脚本整体超时时间（秒）
 REQUEST_TIMEOUT = 2          # 单个请求超时时间（秒）
 OUTPUT_FILENAME = "test_wall_output.txt"  # 输出文件名
 DEFAULT_ENCODING = "utf-8"   # 默认编码
-USE_CURL = True              # 默认使用 curl
+REQUEST_MODE = "hybrid"      # 请求模式: urllib/curl/hybrid（混合模式）
 # ================================================
 
 # 根据平台确定输出目录
@@ -36,9 +36,6 @@ else:
     CACHE_DIR = '/tmp'
 
 OUTPUT_FILE = os.path.join(CACHE_DIR, OUTPUT_FILENAME)
-
-# 全局变量：是否使用 curl
-g_use_curl = USE_CURL
 
 # NTP 服务器列表
 NTP_SERVERS = [
@@ -153,44 +150,117 @@ def curl_request(url, timeout=REQUEST_TIMEOUT):
 
 # ==================== 核心函数 ====================
 
-def query_ip_from_sites(site_list, timeout=REQUEST_TIMEOUT):
+def query_ip_from_sites(site_list, timeout=REQUEST_TIMEOUT, mode="hybrid"):
     """从指定的站点列表中并发查询 IP，返回最先成功的结果"""
-    def query_site_python(url, site_name):
+    def test_latency_urllib(url, site_name):
+        """纯 urllib 测试延迟"""
         try:
+            start_time = time.time()
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=timeout) as response:
-                content = response.read().decode('utf-8').strip()
-                ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', content)
-                if ip_match:
-                    return (ip_match.group(1), site_name)
+                elapsed_ms = (time.time() - start_time) * 1000
+                return (site_name, elapsed_ms, 'urllib')
         except:
             pass
         return None
 
-    def query_site_curl(url, site_name):
+    def test_latency_curl(url, site_name):
+        """纯 curl 测试延迟（返回 Python 测量的总耗时）"""
         try:
-            # 使用 curl 测试连通性，然后用 Python 获取内容
+            start_time = time.time()
             result = curl_request(url, timeout)
+            elapsed_ms = (time.time() - start_time) * 1000
             if result:
-                # curl 成功，再用 Python 获取 IP
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=timeout) as response:
-                    content = response.read().decode('utf-8').strip()
-                    ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', content)
-                    if ip_match:
-                        return (ip_match.group(1), site_name)
+                curl_time, real_time = result
+                # 返回 Python 测量的总耗时（包含进程启动开销）
+                return (site_name, elapsed_ms, 'curl')
         except:
             pass
         return None
 
-    query_func = query_site_curl if g_use_curl else query_site_python
+    # 检查系统是否支持 curl
+    curl_available = get_curl_command() is not None
 
-    with ThreadPoolExecutor(max_workers=len(site_list)) as executor:
-        futures = [executor.submit(query_func, url, name) for url, name in site_list]
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                return result
+    # 第一步：并发测试延迟，找出最快的站点和方式
+    fastest_result = None
+
+    if mode == "hybrid" and curl_available:
+        # 混合模式：curl 和 urllib 同时跑（带标识）
+        with ThreadPoolExecutor(max_workers=len(site_list) * 2) as executor:
+            future_to_task = {}
+            for url, name in site_list:
+                future_to_task[executor.submit(test_latency_urllib, url, name)] = (url, name, 'urllib')
+                future_to_task[executor.submit(test_latency_curl, url, name)] = (url, name, 'curl')
+
+            # 返回最先成功的结果
+            for future in as_completed(future_to_task):
+                result = future.result()
+                if result:
+                    # 验证返回的方法与任务池标识一致
+                    site_name, latency, method = result
+                    url, name, expected_method = future_to_task[future]
+                    if method != expected_method:
+                        print(f"Warning: Method mismatch! Expected {expected_method}, got {method}", file=sys.stderr)
+                    fastest_result = result
+                    break
+
+    elif mode == "urllib":
+        with ThreadPoolExecutor(max_workers=len(site_list)) as executor:
+            future_to_task = {}
+            for url, name in site_list:
+                future_to_task[executor.submit(test_latency_urllib, url, name)] = (url, name, 'urllib')
+            for future in as_completed(future_to_task):
+                result = future.result()
+                if result:
+                    site_name, latency, method = result
+                    url, name, expected_method = future_to_task[future]
+                    if method != expected_method:
+                        print(f"Warning: Method mismatch! Expected {expected_method}, got {method}", file=sys.stderr)
+                    fastest_result = result
+                    break
+
+    elif mode == "curl" and curl_available:
+        with ThreadPoolExecutor(max_workers=len(site_list)) as executor:
+            future_to_task = {}
+            for url, name in site_list:
+                future_to_task[executor.submit(test_latency_curl, url, name)] = (url, name, 'curl')
+            for future in as_completed(future_to_task):
+                result = future.result()
+                if result:
+                    site_name, latency, method = result
+                    url, name, expected_method = future_to_task[future]
+                    if method != expected_method:
+                        print(f"Warning: Method mismatch! Expected {expected_method}, got {method}", file=sys.stderr)
+                    fastest_result = result
+                    break
+
+    if not fastest_result:
+        return None
+
+    # 第二步：用最快的方式获取 IP（不加入任务池，直接请求）
+    site_name, latency, method = fastest_result
+
+    # 找到对应的 URL
+    target_url = None
+    for url, name in site_list:
+        if name == site_name:
+            target_url = url
+            break
+
+    if not target_url:
+        return None
+
+    # 获取 IP 内容
+    try:
+        req = urllib.request.Request(target_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            content = response.read().decode('utf-8').strip()
+            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', content)
+            if ip_match:
+                return (ip_match.group(1), site_name, latency, method)
+    except:
+        pass
+
     return None
 
 def load_cache():
@@ -250,7 +320,7 @@ def get_ip_country(ip_address, timeout=REQUEST_TIMEOUT):
 
     return ('', '🌐')
 
-def test_connectivity(timeout=REQUEST_TIMEOUT, max_workers=5):
+def test_connectivity(timeout=REQUEST_TIMEOUT, max_workers=5, mode="hybrid"):
     """并发测试外网连通性，返回最快响应的延迟"""
     def test_site_python(url, site_label):
         try:
@@ -259,7 +329,7 @@ def test_connectivity(timeout=REQUEST_TIMEOUT, max_workers=5):
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 elapsed_ms = (time.time() - start_time) * 1000
                 if response.status < 400:
-                    return (elapsed_ms, site_label, url)
+                    return (elapsed_ms, site_label, url, 'urllib')
         except:
             pass
         return None
@@ -269,21 +339,41 @@ def test_connectivity(timeout=REQUEST_TIMEOUT, max_workers=5):
             result = curl_request(url, timeout)
             if result:
                 curl_time, real_time = result
-                return (curl_time, site_label, url)
+                return (curl_time, site_label, url, 'curl')
         except:
             pass
         return None
 
-    test_func = test_site_curl if g_use_curl else test_site_python
+    # 检查系统是否支持 curl
+    curl_available = get_curl_command() is not None
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_site = {
-            executor.submit(test_func, url, label): (url, label)
-            for url, label in CONNECTIVITY_SITES
-        }
+    # 根据模式决定任务池大小
+    if mode == "hybrid" and curl_available:
+        pool_size = max_workers * 2
+    else:
+        pool_size = max_workers
+
+    with ThreadPoolExecutor(max_workers=pool_size) as executor:
+        future_to_site = {}
+
+        # 根据模式添加任务（带标识）
+        if mode == "urllib" or mode == "hybrid":
+            for url, label in CONNECTIVITY_SITES:
+                future_to_site[executor.submit(test_site_python, url, label)] = (url, label, 'urllib')
+
+        if (mode == "curl" or mode == "hybrid") and curl_available:
+            for url, label in CONNECTIVITY_SITES:
+                future_to_site[executor.submit(test_site_curl, url, label)] = (url, label, 'curl')
+
+        # 返回最先成功的结果
         for future in as_completed(future_to_site):
             result = future.result()
             if result:
+                # 验证返回的方法与任务池标识一致
+                _, _, _, method = result
+                url, label, expected_method = future_to_site[future]
+                if method != expected_method:
+                    print(f"Warning: Method mismatch! Expected {expected_method}, got {method}", file=sys.stderr)
                 return result
     return None
 
@@ -334,19 +424,24 @@ def parse_args():
                         help='显示NTP延迟 (默认: hide)')
     parser.add_argument('--connectivity', choices=['show', 'hide'],
                         default='show' if SHOW_CONNECTIVITY else 'hide',
-                        help='显示外网连通性延迟 (默认: show)')
+                        help='显示外网连通性延迟 (默认：show)')
     parser.add_argument('--loop', '-l', action='store_true', default=False,
-                        help='启用循环模式，持续运行 (默认: 关闭)')
+                        help='启用循环模式，持续运行 (默认：关闭)')
     parser.add_argument('--interval', '-i', type=int, default=30,
-                        help='循环模式下的间隔秒数 (默认: 30秒)')
+                        help='循环模式下的间隔秒数 (默认：30 秒)')
     parser.add_argument('--encoding', '-e', type=str, default=DEFAULT_ENCODING,
-                        help=f'输出编码（控制台和文件）(默认: {DEFAULT_ENCODING})')
-    parser.add_argument('--use-curl', action='store_true', default=USE_CURL,
-                        help='使用 curl 发起 HTTP 请求（默认启用）')
-    parser.add_argument('--use-urllib', action='store_true', default=False,
-                        help='使用 Python urllib 发起 HTTP 请求')
+                        help=f'输出编码（控制台和文件）(默认：{DEFAULT_ENCODING})')
+    parser.add_argument('--mode', choices=['urllib', 'curl', 'hybrid'],
+                        default=REQUEST_MODE,
+                        help='请求模式：urllib/curl/hybrid（混合模式，默认：hybrid）')
+    parser.add_argument('--show-method', action='store_true', default=False,
+                        help='显示请求方式（curl/urllib）')
     parser.add_argument('--check-curl', action='store_true', default=False,
                         help='检查系统中是否安装了 curl')
+    parser.add_argument('--show-source', action='store_true', default=True,
+                        help='显示来源站点名称（默认启用）')
+    parser.add_argument('--hide-source', action='store_true', default=False,
+                        help='隐藏来源站点名称')
     args = parser.parse_args()
 
     return {
@@ -357,25 +452,26 @@ def parse_args():
         'loop': args.loop,
         'interval': args.interval,
         'encoding': args.encoding,
-        'use_curl': args.use_curl,
-        'use_urllib': args.use_urllib,
+        'mode': args.mode,
+        'show_method': args.show_method,
         'check_curl': args.check_curl,
+        'show_source': args.show_source and not args.hide_source,
     }
 
-def run_once(show_foreign, show_domestic, show_ntp, show_connectivity):
+def run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_source=True, mode="hybrid", show_method=False):
     """执行一次检测并返回输出文本"""
     parts = []
     futures = {}
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         if show_foreign:
-            futures['foreign'] = executor.submit(query_ip_from_sites, FOREIGN_IP_SITES)
+            futures['foreign'] = executor.submit(query_ip_from_sites, FOREIGN_IP_SITES, REQUEST_TIMEOUT, mode)
         if show_domestic:
-            futures['domestic'] = executor.submit(query_ip_from_sites, DOMESTIC_IP_SITES)
+            futures['domestic'] = executor.submit(query_ip_from_sites, DOMESTIC_IP_SITES, REQUEST_TIMEOUT, mode)
         if show_ntp:
             futures['ntp'] = executor.submit(get_fastest_ntp)
         if show_connectivity:
-            futures['connectivity'] = executor.submit(test_connectivity)
+            futures['connectivity'] = executor.submit(test_connectivity, REQUEST_TIMEOUT, 5, mode)
 
         foreign_result = domestic_result = ntp_result = connectivity_result = None
 
@@ -400,18 +496,30 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity):
 
     # Build output content
     if foreign_result:
-        ip_address, site_name = foreign_result
+        ip_address, site_name, latency_ms, method = foreign_result
         try:
             _, flag = get_ip_country(ip_address, timeout=1.0)
         except:
             flag = "🌐"
-        parts.append(f"{flag} {ip_address}")
+        delay_int = int(round(latency_ms))
+        icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
+        method_str = f"{method} " if show_method else ""
+        if show_source:
+            parts.append(f"{flag} {ip_address}｜{method_str}{site_name} {icon} {delay_int}ms")
+        else:
+            parts.append(f"{flag} {ip_address}｜{method_str}{icon} {delay_int}ms")
     elif show_foreign:
         parts.append("❌ 外网")
 
     if show_domestic and domestic_result:
-        ip_address, site_name = domestic_result
-        parts.append(f"🇨🇳 {ip_address}")
+        ip_address, site_name, latency_ms, method = domestic_result
+        delay_int = int(round(latency_ms))
+        icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
+        method_str = f"{method} " if show_method else ""
+        if show_source:
+            parts.append(f"🇨🇳 {ip_address}｜{method_str}{site_name} {icon} {delay_int}ms")
+        else:
+            parts.append(f"🇨🇳 {ip_address}｜{method_str}{icon} {delay_int}ms")
     elif show_domestic:
         parts.append("❌ 国内")
 
@@ -420,16 +528,23 @@ def run_once(show_foreign, show_domestic, show_ntp, show_connectivity):
             delay_ms, server_label, server_name = ntp_result
             delay_int = int(round(delay_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            parts.append(f"{icon} {delay_int}ms")
+            if show_source:
+                parts.append(f"{server_label} {icon} {delay_int}ms")
+            else:
+                parts.append(f"{icon} {delay_int}ms")
         else:
             parts.append("❌ NTP")
 
     if show_connectivity:
         if connectivity_result:
-            delay_ms, site_label, url = connectivity_result
+            delay_ms, site_label, url, method = connectivity_result
             delay_int = int(round(delay_ms))
             icon = "🚀" if delay_int < 100 else "📡" if delay_int < 250 else "⚠️" if delay_int < 500 else "🐌"
-            parts.append(f"{icon} {delay_int}ms")
+            method_str = f"{method} " if show_method else ""
+            if show_source:
+                parts.append(f"{method_str}{site_label} {icon} {delay_int}ms")
+            else:
+                parts.append(f"{icon} {delay_int}ms")
         else:
             parts.append("❌ 连通性")
 
@@ -467,14 +582,14 @@ def write_output(text, encoding):
         except:
             print(error_msg, file=sys.stderr)
 
-def run_with_loop(show_foreign, show_domestic, show_ntp, show_connectivity, interval, encoding):
+def run_with_loop(show_foreign, show_domestic, show_ntp, show_connectivity, interval, encoding, show_source=True, mode="hybrid", show_method=False):
     """Loop mode: run continuously with specified interval"""
     global CURRENT_ENCODING
     CURRENT_ENCODING = encoding
 
     info_lines = [
         f"Starting loop mode with interval {interval} seconds",
-        f"Request method: {'curl' if g_use_curl else 'Python urllib'}",
+        f"Request mode: {mode}",
         f"Output file: {OUTPUT_FILE} (encoding: {encoding})",
         "Press Ctrl+C to stop\n"
     ]
@@ -483,7 +598,7 @@ def run_with_loop(show_foreign, show_domestic, show_ntp, show_connectivity, inte
 
     while True:
         try:
-            output_text = run_once(show_foreign, show_domestic, show_ntp, show_connectivity)
+            output_text = run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_source, mode, show_method)
             write_output(output_text, encoding)
         except Exception as e:
             error_msg = f"Error: {e}"
@@ -495,7 +610,7 @@ def run_with_loop(show_foreign, show_domestic, show_ntp, show_connectivity, inte
 
         time.sleep(interval)
 
-def run_single(show_foreign, show_domestic, show_ntp, show_connectivity, encoding):
+def run_single(show_foreign, show_domestic, show_ntp, show_connectivity, encoding, show_source=True, mode="hybrid", show_method=False):
     """单次模式：执行一次后退出"""
     # 设置全局编码
     global CURRENT_ENCODING
@@ -510,7 +625,7 @@ def run_single(show_foreign, show_domestic, show_ntp, show_connectivity, encodin
         signal.alarm(TIMEOUT + 1)
 
     try:
-        output_text = run_once(show_foreign, show_domestic, show_ntp, show_connectivity)
+        output_text = run_once(show_foreign, show_domestic, show_ntp, show_connectivity, show_source, mode, show_method)
         write_output(output_text, encoding)
     finally:
         if sys.platform != 'win32':
@@ -540,20 +655,12 @@ def check_curl_availability():
         print()
 
 def main():
-    global g_use_curl
-
     args = parse_args()
 
     # 检查 curl 可用性
     if args['check_curl']:
         check_curl_availability()
         return
-
-    # 设置请求方式：--use-urllib 优先级最高
-    if args['use_urllib']:
-        g_use_curl = False
-    else:
-        g_use_curl = args['use_curl']
 
     if args['loop']:
         # 循环模式
@@ -563,7 +670,10 @@ def main():
             args['show_ntp'],
             args['show_connectivity'],
             args['interval'],
-            args['encoding']
+            args['encoding'],
+            args['show_source'],
+            args['mode'],
+            args['show_method']
         )
     else:
         # 单次模式
@@ -572,7 +682,10 @@ def main():
             args['show_domestic'],
             args['show_ntp'],
             args['show_connectivity'],
-            args['encoding']
+            args['encoding'],
+            args['show_source'],
+            args['mode'],
+            args['show_method']
         )
 
 if __name__ == "__main__":
